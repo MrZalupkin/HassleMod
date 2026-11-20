@@ -1,0 +1,88 @@
+name: Download site
+
+on:
+  release:
+    types: [published, edited, deleted, unpublished, released, prereleased]
+  push:
+    paths: [site/**, .github/workflows/download-site.yml]
+  workflow_dispatch:
+
+concurrency:
+  group: download-site
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref_name == github.event.repository.default_branch || github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/configure-pages@v5
+      - name: Generate version.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from urllib.error import HTTPError
+          from urllib.request import Request, urlopen
+          
+          
+          def build_manifest(repository, release):
+              releases_url = f"https://github.com/{repository}/releases"
+              if release is None:
+                  return dict(version=None, download_url=None, release_url=releases_url, published_at=None)
+          
+              tag = release["tag_name"]
+              download = next(
+                  (asset["browser_download_url"] for asset in release["assets"]
+                   if asset["name"] == "HassleMod.zip" and asset["state"] == "uploaded"),
+                  None,
+              )
+              return dict(
+                  version=tag.removeprefix("v"),
+                  download_url=download,
+                  release_url=release["html_url"],
+                  published_at=release["published_at"],
+              )
+          
+          
+          def fetch_latest(repository):
+              request = Request(
+                  f"https://api.github.com/repos/{repository}/releases/latest",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  },
+              )
+              try:
+                  with urlopen(request, timeout=20) as response:
+                      return json.load(response)
+              except HTTPError as error:
+                  if error.code != 404:
+                      raise
+                  return None
+          
+          
+          if __name__ == "__main__":
+              repository = os.environ["GITHUB_REPOSITORY"]
+              manifest = build_manifest(repository, fetch_latest(repository))
+              output = Path("site/public/version.json")
+              output.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/public
+      - uses: actions/deploy-pages@v4
+        id: deploy
